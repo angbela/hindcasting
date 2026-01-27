@@ -7,8 +7,8 @@ from datetime import datetime, timedelta
 # =====================================================
 # Page config
 # =====================================================
-st.set_page_config(page_title="Wind EVA (RMSE-based)", layout="wide")
-st.title("🌬️ Wind Extreme Value Analysis (RMSE-based Best Fit)")
+st.set_page_config(page_title="Wind EVA & Hindcasting", layout="wide")
+st.title("🌬️ Wind Extreme Value Analysis & Wave Hindcasting")
 
 # =====================================================
 # Constants
@@ -32,47 +32,55 @@ def degree_to_compass(deg):
 def rmse(obs, sim):
     return np.sqrt(np.mean((obs - sim) ** 2))
 
+def get_rl(u):
+    if 0 <= u < 1: return 1.85
+    elif u < 2: return 1.75
+    elif u < 3: return 1.65
+    elif u < 4: return 1.55
+    elif u < 5: return 1.45
+    elif u < 6: return 1.40
+    elif u < 7: return 1.35
+    elif u < 8: return 1.25
+    elif u < 9: return 1.20
+    elif u < 10: return 1.15
+    elif u < 11: return 1.10
+    elif u < 12: return 1.08
+    elif u < 13: return 1.06
+    elif u < 14: return 1.04
+    elif u < 15: return 1.02
+    elif u < 16: return 1.00
+    elif u < 17: return 0.98
+    elif u < 18: return 0.95
+    else: return 0.90
+
 # =====================================================
 # Initialize session state
 # =====================================================
-if 'processed' not in st.session_state:
-    st.session_state.processed = False
-if 'df' not in st.session_state:
-    st.session_state.df = None
-if 'annual_max' not in st.session_state:
-    st.session_state.annual_max = None
-if 'eva_table' not in st.session_state:
-    st.session_state.eva_table = None
-if 'best_fit_df' not in st.session_state:
-    st.session_state.best_fit_df = None
+for k in [
+    "processed","df","df_hindcast","annual_max","annual_max_wave",
+    "eva_table","eva_table_wave","best_fit_df","best_fit_wave_df"
+]:
+    if k not in st.session_state:
+        st.session_state[k] = None if k != "processed" else False
 
 # =====================================================
 # Sidebar input
 # =====================================================
 st.sidebar.header("⏱ Time Settings")
-start_date = st.sidebar.date_input(
-    "Start date",
-    value=datetime(2005, 1, 1)
-)
-start_hour = st.sidebar.selectbox(
-    "Start hour",
-    [f"{h:02d}:00" for h in range(24)],
-    index=0
-)
-interval_hours = st.sidebar.number_input(
-    "Time interval (hours)",
-    min_value=1,
-    value=1,
-    step=1
-)
+start_date = st.sidebar.date_input("Start date", value=datetime(2005, 1, 1))
+start_hour = st.sidebar.selectbox("Start hour", [f"{h:02d}:00" for h in range(24)])
+interval_hours = st.sidebar.number_input("Time interval (hours)", 1, step=1)
 
 # =====================================================
 # Data input
 # =====================================================
-st.subheader("📋 Paste u10 and v10 data")
-st.caption("Two columns: u10 v10 (space or tab separated)")
-raw_text = st.text_area("Paste data here", height=220)
-run_btn = st.button("🚀 Process & Run EVA")
+col1, col2 = st.columns(2)
+with col1:
+    raw_text = st.text_area("📋 Paste u10 v10", height=220)
+with col2:
+    fetch_text = st.text_area("🧭 Paste Fetch (km)", height=220)
+
+run_btn = st.button("🚀 Process & Run Analysis")
 
 # =====================================================
 # Main processing
@@ -80,151 +88,322 @@ run_btn = st.button("🚀 Process & Run EVA")
 if run_btn and raw_text.strip():
     try:
         # -------------------------
-        # Parse input
+        # Parse fetch
+        # -------------------------
+        fetch_dict = {d: 0.0 for d in DIRECTION_ORDER}
+        for line in fetch_text.strip().splitlines():
+            p = line.split()
+            if len(p) >= 2 and p[0].upper() in fetch_dict:
+                fetch_dict[p[0].upper()] = float(p[1])
+
+        fetch = np.array([fetch_dict[d] for d in DIRECTION_ORDER])
+        fetch = np.where(fetch <= 200, fetch, 200)
+
+        # -------------------------
+        # Parse wind
         # -------------------------
         rows = []
         for line in raw_text.strip().splitlines():
             p = line.split()
             if len(p) >= 2:
                 rows.append([float(p[0]), float(p[1])])
+
         df = pd.DataFrame(rows, columns=["u10", "v10"])
-        
+
         # -------------------------
         # Time index
         # -------------------------
-        start_dt = datetime.combine(
-            start_date,
-            datetime.strptime(start_hour, "%H:%M").time()
-        )
-        df["datetime"] = [
-            start_dt + timedelta(hours=i * interval_hours)
-            for i in range(len(df))
-        ]
+        start_dt = datetime.combine(start_date, datetime.strptime(start_hour, "%H:%M").time())
+        df["datetime"] = [start_dt + timedelta(hours=i * interval_hours) for i in range(len(df))]
         df["year"] = df["datetime"].dt.year
-        
+        df["month"] = df["datetime"].dt.month
+        df["day"] = df["datetime"].dt.day
+        df["time"] = df["datetime"].dt.strftime("%H:%M")
+
         # -------------------------
-        # Wind calculation
+        # Wind
         # -------------------------
         df["speed"] = compute_wind_speed(df["u10"], df["v10"])
         df["dir_deg"] = wind_dir_from(df["u10"], df["v10"])
         df["direction"] = df["dir_deg"].apply(degree_to_compass)
-        
+
+        # -------------------------
+        # Hindcasting (REVISED – CONSISTENT WITH REFERENCE)
+        # -------------------------
+        feff = np.array([fetch[DIRECTION_ORDER.index(d)] for d in df["direction"]])
+
+        u_stab = df["speed"].values * 1.1
+        rl = np.array([get_rl(u) for u in u_stab])
+        u_a = 0.71 * u_stab * rl
+
+        duration_h = np.ones(len(df))
+        for i in range(1, len(df)):
+            duration_h[i] = (
+                duration_h[i - 1] + 1
+                if df["direction"].iloc[i] == df["direction"].iloc[i - 1]
+                else 1
+            )
+
+        duration_s = duration_h * 3600
+        g = 9.81
+
+        hs, tp, ts, status = [], [], [], []
+
+        for i in range(len(df)):
+
+            # Safety guard (does NOT change physics)
+            if feff[i] <= 0 or u_a[i] <= 0:
+                hs.append(0.0)
+                tp.append(0.0)
+                ts.append(0.0)
+                status.append("No Fetch / Calm")
+                continue
+
+            fetcheff = feff[i] * 1000  # km → m
+
+            time_critical = (
+                (68.8 * u_a[i] / g)
+                * ((g * fetcheff) / u_a[i] ** 2) ** (2 / 3)
+            )
+
+            cek_time_crit = (g * time_critical) / u_a[i]
+
+            if cek_time_crit > 71500:
+                # Fully Developed Sea
+                hs_val = 0.2433 * (u_a[i] ** 2) / g
+                tp_val = 8.132 * u_a[i] / g
+                ts_val = 0.95 * tp_val
+                stat = "Fully Developed Sea"
+
+            else:
+                if duration_s[i] < time_critical:
+                    # Duration Limited
+                    fmin = (
+                        (u_a[i] ** 2) / g
+                        * ((g * duration_s[i]) / (u_a[i] * 68.8)) ** (3 / 2)
+                    )
+
+                    hs_val = (
+                        0.0016 * (u_a[i] ** 2) / g
+                        * ((g * fmin) / (u_a[i] ** 2)) ** 0.5
+                    )
+
+                    tp_val = (
+                        0.2857
+                        * ((g * fmin) / u_a[i] ** 2) ** (1 / 3)
+                        * (u_a[i] / g)
+                    )
+
+                    ts_val = 0.95 * tp_val
+                    stat = "Duration Limited"
+
+                else:
+                    # Fetch Limited
+                    hs_val = (
+                        0.0016 * (u_a[i] ** 2) / g
+                        * ((g * fetcheff) / (u_a[i] ** 2)) ** 0.5
+                    )
+
+                    tp_val = (
+                        0.2857
+                        * ((g * fetcheff) / u_a[i] ** 2) ** (1 / 3)
+                        * (u_a[i] / g)
+                    )
+
+                    ts_val = 0.95 * tp_val
+                    stat = "Fetch Limited"
+
+            hs.append(hs_val)
+            tp.append(tp_val)
+            ts.append(ts_val)
+            status.append(stat)
+
+        df["wave_height"] = np.round(hs, 2)
+        df["wave_period"] = np.round(ts, 2)
+        df["wave_type"] = status
+
+
+        # -------------------------
+        # Hindcast output
+        # -------------------------
+        df_hindcast = df[[
+            "year","month","day","time","speed","dir_deg","direction",
+            "wave_height","wave_period","wave_type"
+        ]].copy()
+
+        df_hindcast.columns = [
+            "Year","Month","Day","Time","Wind_Speed","Wind_Dir_Deg",
+            "Wind_Dir","Wave_Height","Wave_Period","Wave_Type"
+        ]
+
         # =====================================================
-        # Annual maximum table
+        # Annual maxima
         # =====================================================
-        annual_max = (
-            df.groupby(["year", "direction"], observed=False)["speed"]
-            .max()
-            .unstack()
-            .reindex(columns=DIRECTION_ORDER)
-        )
-        
+        annual_max = df.groupby(["year","direction"])["speed"].max().unstack()
+        annual_max_wave = df.groupby(["year","direction"])["wave_height"].max().unstack()
+
+        annual_max = annual_max.reindex(columns=DIRECTION_ORDER)
+        annual_max_wave = annual_max_wave.reindex(columns=DIRECTION_ORDER)
+
         # =====================================================
-        # EVA
+        # EVA – Wind (UNCHANGED)
         # =====================================================
         eva_table = pd.DataFrame(index=RETURN_PERIODS, columns=DIRECTION_ORDER)
         best_fit_rows = []
-        
+
         for d in DIRECTION_ORDER:
             data_dir = annual_max[d].dropna().values
             if len(data_dir) < 5:
                 continue
-            
+
             data_dir = np.sort(data_dir)
-            probs = (np.arange(1, len(data_dir) + 1) - 0.44) / (len(data_dir) + 0.12)
+            probs = (np.arange(1,len(data_dir)+1)-0.44)/(len(data_dir)+0.12)
             fits = {}
-            
+
             mu, sd = stats.norm.fit(data_dir)
             fits["Normal"] = (rmse(data_dir, stats.norm.ppf(probs, mu, sd)), stats.norm(mu, sd))
-            
+
             s, loc, sc = stats.lognorm.fit(data_dir, floc=0)
             fits["Lognormal"] = (rmse(data_dir, stats.lognorm.ppf(probs, s, loc, sc)), stats.lognorm(s, loc, sc))
-            
+
             loc, sc = stats.gumbel_r.fit(data_dir)
             fits["Gumbel"] = (rmse(data_dir, stats.gumbel_r.ppf(probs, loc, sc)), stats.gumbel_r(loc, sc))
-            
+
             c, loc, sc = stats.weibull_min.fit(data_dir, floc=0)
             fits["Weibull"] = (rmse(data_dir, stats.weibull_min.ppf(probs, c, loc, sc)), stats.weibull_min(c, loc, sc))
-            
+
+            logx = np.log10(data_dir[data_dir > 0])
+            sk, loc, sc = stats.pearson3.fit(logx)
+            fits["Log-Pearson III"] = (
+                rmse(data_dir, 10**stats.pearson3.ppf(probs, sk, loc, sc)),
+                (sk, loc, sc)
+            )
+
+            best = min(fits, key=lambda k: fits[k][0])
+            best_fit_rows.append([d, best, round(fits[best][0], 4)])
+
+            for rp in RETURN_PERIODS:
+                p = 1 - 1/rp
+                eva_table.loc[rp, d] = round(
+                    10**stats.pearson3.ppf(p, *fits[best][1]) if best=="Log-Pearson III"
+                    else fits[best][1].ppf(p), 2
+                )
+
+        best_fit_df = pd.DataFrame(best_fit_rows, columns=["Direction","Best Fit","RMSE"]).set_index("Direction")
+
+        # =====================================================
+        # EVA – Wave (ONLY CHANGE IS HERE)
+        # =====================================================
+        eva_table_wave = pd.DataFrame(index=RETURN_PERIODS, columns=DIRECTION_ORDER)
+        best_fit_wave_rows = []
+
+        for d in DIRECTION_ORDER:
+
+            # ⛔ Skip wave EVA if fetch = 0
+            if fetch_dict.get(d, 0) <= 0:
+                continue
+
+            data_dir = annual_max_wave[d].dropna().values
+            data_dir = data_dir[data_dir > 0]
+
+            if len(data_dir) < 5:
+                continue
+
+            data_dir = np.sort(data_dir)
+            probs = (np.arange(1,len(data_dir)+1)-0.44)/(len(data_dir)+0.12)
+            fits = {}
+
+            mu, sd = stats.norm.fit(data_dir)
+            fits["Normal"] = (rmse(data_dir, stats.norm.ppf(probs, mu, sd)), stats.norm(mu, sd))
+
+            s, loc, sc = stats.lognorm.fit(data_dir, floc=0)
+            fits["Lognormal"] = (rmse(data_dir, stats.lognorm.ppf(probs, s, loc, sc)), stats.lognorm(s, loc, sc))
+
+            loc, sc = stats.gumbel_r.fit(data_dir)
+            fits["Gumbel"] = (rmse(data_dir, stats.gumbel_r.ppf(probs, loc, sc)), stats.gumbel_r(loc, sc))
+
+            c, loc, sc = stats.weibull_min.fit(data_dir, floc=0)
+            fits["Weibull"] = (rmse(data_dir, stats.weibull_min.ppf(probs, c, loc, sc)), stats.weibull_min(c, loc, sc))
+
             logx = np.log10(data_dir)
             sk, loc, sc = stats.pearson3.fit(logx)
-            sim = 10 ** stats.pearson3.ppf(probs, sk, loc, sc)
-            fits["Log-Pearson III"] = (rmse(data_dir, sim), (sk, loc, sc))
-            
-            best_name = min(fits, key=lambda k: fits[k][0])
-            best_rmse = round(fits[best_name][0], 4)
-            best_fit_rows.append([d, best_name, best_rmse])
-            
-            for rp in RETURN_PERIODS:
-                p = 1 - 1 / rp
-                if best_name == "Log-Pearson III":
-                    sk, loc, sc = fits[best_name][1]
-                    val = 10 ** stats.pearson3.ppf(p, sk, loc, sc)
-                else:
-                    val = fits[best_name][1].ppf(p)
-                eva_table.loc[rp, d] = round(val, 2)
-        
-        best_fit_df = (
-            pd.DataFrame(best_fit_rows, columns=["Direction", "Best Fit", "RMSE"])
-            .set_index("Direction")
-            .reindex(DIRECTION_ORDER)
-        )
-        
-        # Store results in session state
-        st.session_state.df = df
-        st.session_state.annual_max = annual_max
-        st.session_state.eva_table = eva_table
-        st.session_state.best_fit_df = best_fit_df
-        st.session_state.processed = True
-        
-    except Exception as e:
-        st.error(f"Error processing data: {e}")
+            fits["Log-Pearson III"] = (
+                rmse(data_dir, 10**stats.pearson3.ppf(probs, sk, loc, sc)),
+                (sk, loc, sc)
+            )
 
-# =====================================================
-# Display results if processed
-# =====================================================
-if st.session_state.processed:
-    st.subheader("📊 Processed Data Preview")
-    st.dataframe(st.session_state.df.head())
-    
-    st.subheader("📈 Annual Maximum Wind Speed")
-    st.dataframe(st.session_state.annual_max)
-    
-    st.subheader("🏆 Best Distribution per Direction (RMSE)")
-    st.dataframe(st.session_state.best_fit_df)
-    
-    st.subheader("📘 EVA Return Level Table")
-    st.dataframe(st.session_state.eva_table)
-    
+            best = min(fits, key=lambda k: fits[k][0])
+            best_fit_wave_rows.append([d, best, round(fits[best][0], 4)])
+
+            for rp in RETURN_PERIODS:
+                p = 1 - 1/rp
+                eva_table_wave.loc[rp, d] = round(
+                    10**stats.pearson3.ppf(p, *fits[best][1]) if best=="Log-Pearson III"
+                    else fits[best][1].ppf(p), 2
+                )
+
+        best_fit_wave_df = pd.DataFrame(
+            best_fit_wave_rows, columns=["Direction","Best Fit","RMSE"]
+        ).set_index("Direction")
+
+        # -------------------------
+        # Store
+        # -------------------------
+        st.session_state.update(
+            processed=True,
+            df=df,
+            df_hindcast=df_hindcast,
+            annual_max=annual_max,
+            annual_max_wave=annual_max_wave,
+            eva_table=eva_table,
+            eva_table_wave=eva_table_wave,
+            best_fit_df=best_fit_df,
+            best_fit_wave_df=best_fit_wave_df
+        )
+
+        st.success("✅ Processing complete!")
+
+    except Exception as e:
+        st.error(f"Error: {e}")
+
     # =====================================================
-    # DOWNLOAD BUTTONS (CSV)
+    # Display results if processed
     # =====================================================
-    st.subheader("⬇️ Download Results (CSV)")
-    
-    st.download_button(
-        "Download processed data (CSV)",
-        st.session_state.df.to_csv(index=False),
-        file_name="processed_data.csv",
-        mime="text/csv"
-    )
-    
-    st.download_button(
-        "Download annual maximum table (CSV)",
-        st.session_state.annual_max.to_csv(),
-        file_name="annual_max_table.csv",
-        mime="text/csv"
-    )
-    
-    st.download_button(
-        "Download best distribution + RMSE (CSV)",
-        st.session_state.best_fit_df.to_csv(),
-        file_name="best_distribution_rmse.csv",
-        mime="text/csv"
-    )
-    
-    st.download_button(
-        "Download EVA result table (CSV)",
-        st.session_state.eva_table.to_csv(),
-        file_name="eva_results.csv",
-        mime="text/csv"
-    )
+    if st.session_state.processed:
+
+        tab1, tab2, tab3 = st.tabs([
+            "📊 Hindcast Results",
+            "🌬️ Wind EVA",
+            "🌊 Wave EVA"
+        ])
+
+        with tab1:
+            st.subheader("📋 Hindcast Data Preview")
+            st.dataframe(st.session_state.df_hindcast.head(20))
+
+            st.download_button(
+                "⬇️ Download Hindcast Results (CSV)",
+                st.session_state.df_hindcast.to_csv(index=False),
+                file_name="hindcast_results.csv",
+                mime="text/csv"
+            )
+
+        with tab2:
+            st.subheader("📈 Annual Maximum Wind Speed by Direction")
+            st.dataframe(st.session_state.annual_max)
+
+            st.subheader("🏆 Best Distribution per Direction (Wind)")
+            st.dataframe(st.session_state.best_fit_df)
+
+            st.subheader("📘 Wind EVA Return Levels")
+            st.dataframe(st.session_state.eva_table)
+
+        with tab3:
+            st.subheader("📈 Annual Maximum Wave Height by Direction")
+            st.dataframe(st.session_state.annual_max_wave)
+
+            st.subheader("🏆 Best Distribution per Direction (Wave)")
+            st.dataframe(st.session_state.best_fit_wave_df)
+
+            st.subheader("📘 Wave EVA Return Levels")
+            st.dataframe(st.session_state.eva_table_wave)
