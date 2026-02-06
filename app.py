@@ -1,6 +1,7 @@
 import streamlit as st
 import numpy as np
 import pandas as pd
+import math
 from scipy import stats
 from datetime import datetime, timedelta
 
@@ -52,6 +53,13 @@ def get_rl(u):
     elif u < 17: return 0.98
     elif u < 18: return 0.95
     else: return 0.90
+
+def roundup_excel(x, ndigits=1):
+    """Round up to specified decimal places like Excel ROUNDUP"""
+    if np.isnan(x) or np.isinf(x):
+        return 0.0
+    factor = 10**ndigits
+    return math.ceil(x * factor) / factor
 
 # =====================================================
 # Initialize session state
@@ -128,70 +136,95 @@ if run_btn and raw_text.strip():
         df["direction"] = df["dir_deg"].apply(degree_to_compass)
 
         # -------------------------
-        # Hindcasting (REVISED – CONSISTENT WITH REFERENCE)
+        # Hindcasting (CORRECTED)
         # -------------------------
         feff = np.array([fetch[DIRECTION_ORDER.index(d)] for d in df["direction"]])
 
         u_stab = df["speed"].values * 1.1
         rl = np.array([get_rl(u) for u in u_stab])
-        u_a = 0.71 * u_stab * rl
+        u_a = 0.71 * (u_stab * rl) ** 1.23
+        df["u_a"] = u_a
 
         duration_h = np.ones(len(df))
         for i in range(1, len(df)):
-            duration_h[i] = (
-                duration_h[i - 1] + 1
-                if df["direction"].iloc[i] == df["direction"].iloc[i - 1]
-                else 1
-            )
-
+            same_dir = df["direction"].iloc[i] == df["direction"].iloc[i - 1]
+            # ✅ CORRECTED: Only check direction like Excel, not u_a
+            duration_h[i] = duration_h[i - 1] + 1 if same_dir else 1
+            
         duration_s = duration_h * 3600
         g = 9.81
 
-        hs, tp, ts, status = [], [], [], []
+        # Initialize arrays to store results for ALL timesteps
+        hs = []
+        tp = []
+        ts = []
+        status = []
+        time_critical_list = []
 
         for i in range(len(df)):
 
-            # Safety guard (does NOT change physics)
+            # Safety guard for zero/negative fetch or wind
             if feff[i] <= 0 or u_a[i] <= 0:
                 hs.append(0.0)
                 tp.append(0.0)
                 ts.append(0.0)
-                status.append("No Fetch / Calm")
+                status.append("Fetch Limited")
+                time_critical_list.append(0.0)
                 continue
 
-            fetcheff = feff[i] * 1000  # km → m
+            fetcheff = float(feff[i] * 1000)  # km → m, ensure float
+            u_a_val = float(u_a[i])  # ensure float
+            duration_s_val = float(duration_s[i])  # ensure float
 
-            time_critical = (
-                (68.8 * u_a[i] / g)
-                * ((g * fetcheff) / u_a[i] ** 2) ** (2 / 3)
-            )
-
-            cek_time_crit = (g * time_critical) / u_a[i]
+            # ✅ Calculate time_critical with overflow protection
+            try:
+                # Calculate components separately to avoid overflow
+                term1 = 68.8 * u_a_val / g
+                term2_base = (g * fetcheff) / (u_a_val ** 2)
+                
+                # Check for reasonable values before exponentiation
+                if term2_base <= 0 or term1 <= 0:
+                    time_critical = 0.0
+                    cek_time_crit = 0.0
+                elif term2_base > 1e10:  # Prevent overflow
+                    time_critical = 1e10  # Cap at large value
+                    cek_time_crit = 1e10
+                else:
+                    term2 = term2_base ** (2/3)
+                    time_critical = term1 * term2
+                    cek_time_crit = (g * time_critical) / u_a_val
+                    
+            except (OverflowError, ValueError):
+                time_critical = 1e10
+                cek_time_crit = 1e10
 
             if cek_time_crit > 71500:
                 # Fully Developed Sea
-                hs_val = 0.2433 * (u_a[i] ** 2) / g
-                tp_val = 8.132 * u_a[i] / g
+                hs_val = 0.2433 * (u_a_val ** 2) / g
+                tp_val = 8.132 * u_a_val / g  # ✅ Corrected to match Excel
                 ts_val = 0.95 * tp_val
                 stat = "Fully Developed Sea"
 
             else:
-                if duration_s[i] < time_critical:
+                if duration_s_val < time_critical:
                     # Duration Limited
-                    fmin = (
-                        (u_a[i] ** 2) / g
-                        * ((g * duration_s[i]) / (u_a[i] * 68.8)) ** (3 / 2)
-                    )
+                    try:
+                        fmin = (
+                            (u_a_val ** 2) / g
+                            * ((g * duration_s_val) / (u_a_val * 68.8)) ** (3 / 2)
+                        )
+                    except (OverflowError, ValueError):
+                        fmin = fetcheff  # fallback to fetch limited
 
                     hs_val = (
-                        0.0016 * (u_a[i] ** 2) / g
-                        * ((g * fmin) / (u_a[i] ** 2)) ** 0.5
+                        0.0016 * (u_a_val ** 2) / g
+                        * ((g * fmin) / (u_a_val ** 2)) ** 0.5
                     )
 
                     tp_val = (
                         0.2857
-                        * ((g * fmin) / u_a[i] ** 2) ** (1 / 3)
-                        * (u_a[i] / g)
+                        * ((g * fmin) / u_a_val ** 2) ** (1 / 3)
+                        * (u_a_val / g)
                     )
 
                     ts_val = 0.95 * tp_val
@@ -200,14 +233,14 @@ if run_btn and raw_text.strip():
                 else:
                     # Fetch Limited
                     hs_val = (
-                        0.0016 * (u_a[i] ** 2) / g
-                        * ((g * fetcheff) / (u_a[i] ** 2)) ** 0.5
+                        0.0016 * (u_a_val ** 2) / g
+                        * ((g * fetcheff) / (u_a_val ** 2)) ** 0.5
                     )
 
                     tp_val = (
                         0.2857
-                        * ((g * fetcheff) / u_a[i] ** 2) ** (1 / 3)
-                        * (u_a[i] / g)
+                        * ((g * fetcheff) / u_a_val ** 2) ** (1 / 3)
+                        * (u_a_val / g)
                     )
 
                     ts_val = 0.95 * tp_val
@@ -217,23 +250,30 @@ if run_btn and raw_text.strip():
             tp.append(tp_val)
             ts.append(ts_val)
             status.append(stat)
+            time_critical_list.append(time_critical)
 
+        # ✅ Assign all calculated values to dataframe
         df["wave_height"] = np.round(hs, 2)
+        df["peak_wave_period"] = np.round(tp, 2)
         df["wave_period"] = np.round(ts, 2)
         df["wave_type"] = status
-
+        df["u_stab"] = u_stab
+        df["rl"] = rl
+        df["duration_h"] = duration_h
+        df["duration_s"] = duration_s
+        df["time_critical"] = time_critical_list
 
         # -------------------------
         # Hindcast output
         # -------------------------
         df_hindcast = df[[
             "year","month","day","time","speed","dir_deg","direction",
-            "wave_height","wave_period","wave_type"
+            "wave_height","peak_wave_period","wave_period"
         ]].copy()
 
         df_hindcast.columns = [
             "Year","Month","Day","Time","Wind_Speed","Wind_Dir_Deg",
-            "Wind_Dir","Wave_Height","Wave_Period","Wave_Type"
+            "Wind_Dir","Hs","Tp","Ts"
         ]
 
         # =====================================================
@@ -246,7 +286,7 @@ if run_btn and raw_text.strip():
         annual_max_wave = annual_max_wave.reindex(columns=DIRECTION_ORDER)
 
         # =====================================================
-        # EVA – Wind (UNCHANGED)
+        # EVA – Wind
         # =====================================================
         eva_table = pd.DataFrame(index=RETURN_PERIODS, columns=DIRECTION_ORDER)
         best_fit_rows = []
@@ -256,43 +296,77 @@ if run_btn and raw_text.strip():
             if len(data_dir) < 5:
                 continue
 
+            # ✅ Sanitize data: convert to float64 and remove infinities
+            data_dir = np.array(data_dir, dtype=np.float64)
+            data_dir = data_dir[np.isfinite(data_dir)]
+            
+            if len(data_dir) < 5:
+                continue
+                
             data_dir = np.sort(data_dir)
             probs = (np.arange(1,len(data_dir)+1)-0.44)/(len(data_dir)+0.12)
             fits = {}
 
-            mu, sd = stats.norm.fit(data_dir)
-            fits["Normal"] = (rmse(data_dir, stats.norm.ppf(probs, mu, sd)), stats.norm(mu, sd))
+            # Try Normal distribution
+            try:
+                mu, sd = stats.norm.fit(data_dir)
+                fits["Normal"] = (rmse(data_dir, stats.norm.ppf(probs, mu, sd)), stats.norm(mu, sd))
+            except Exception:
+                pass
 
-            s, loc, sc = stats.lognorm.fit(data_dir, floc=0)
-            fits["Lognormal"] = (rmse(data_dir, stats.lognorm.ppf(probs, s, loc, sc)), stats.lognorm(s, loc, sc))
+            # Try Lognormal distribution
+            try:
+                s, loc, sc = stats.lognorm.fit(data_dir, floc=0)
+                fits["Lognormal"] = (rmse(data_dir, stats.lognorm.ppf(probs, s, loc, sc)), stats.lognorm(s, loc, sc))
+            except Exception:
+                pass
 
-            loc, sc = stats.gumbel_r.fit(data_dir)
-            fits["Gumbel"] = (rmse(data_dir, stats.gumbel_r.ppf(probs, loc, sc)), stats.gumbel_r(loc, sc))
+            # Try Gumbel distribution with error handling
+            try:
+                loc, sc = stats.gumbel_r.fit(data_dir)
+                fits["Gumbel"] = (rmse(data_dir, stats.gumbel_r.ppf(probs, loc, sc)), stats.gumbel_r(loc, sc))
+            except (OverflowError, ValueError, RuntimeError):
+                pass
 
-            c, loc, sc = stats.weibull_min.fit(data_dir, floc=0)
-            fits["Weibull"] = (rmse(data_dir, stats.weibull_min.ppf(probs, c, loc, sc)), stats.weibull_min(c, loc, sc))
+            # Try Weibull distribution
+            try:
+                c, loc, sc = stats.weibull_min.fit(data_dir, floc=0)
+                fits["Weibull"] = (rmse(data_dir, stats.weibull_min.ppf(probs, c, loc, sc)), stats.weibull_min(c, loc, sc))
+            except Exception:
+                pass
 
-            logx = np.log10(data_dir[data_dir > 0])
-            sk, loc, sc = stats.pearson3.fit(logx)
-            fits["Log-Pearson III"] = (
-                rmse(data_dir, 10**stats.pearson3.ppf(probs, sk, loc, sc)),
-                (sk, loc, sc)
-            )
+            # Try Log-Pearson III distribution
+            try:
+                logx = np.log10(data_dir[data_dir > 0])
+                sk, loc, sc = stats.pearson3.fit(logx)
+                fits["Log-Pearson III"] = (
+                    rmse(data_dir, 10**stats.pearson3.ppf(probs, sk, loc, sc)),
+                    (sk, loc, sc)
+                )
+            except Exception:
+                pass
+
+            # Only proceed if at least one distribution fit succeeded
+            if not fits:
+                continue
 
             best = min(fits, key=lambda k: fits[k][0])
             best_fit_rows.append([d, best, round(fits[best][0], 4)])
 
             for rp in RETURN_PERIODS:
                 p = 1 - 1/rp
-                eva_table.loc[rp, d] = round(
-                    10**stats.pearson3.ppf(p, *fits[best][1]) if best=="Log-Pearson III"
-                    else fits[best][1].ppf(p), 2
-                )
+                try:
+                    eva_table.loc[rp, d] = round(
+                        10**stats.pearson3.ppf(p, *fits[best][1]) if best=="Log-Pearson III"
+                        else fits[best][1].ppf(p), 2
+                    )
+                except Exception:
+                    eva_table.loc[rp, d] = np.nan
 
-        best_fit_df = pd.DataFrame(best_fit_rows, columns=["Direction","Best Fit","RMSE"]).set_index("Direction")
+        best_fit_df = pd.DataFrame(best_fit_rows, columns=["Direction","Best Fit","RMSE"]).set_index("Direction") if best_fit_rows else pd.DataFrame()
 
         # =====================================================
-        # EVA – Wave (ONLY CHANGE IS HERE)
+        # EVA – Wave
         # =====================================================
         eva_table_wave = pd.DataFrame(index=RETURN_PERIODS, columns=DIRECTION_ORDER)
         best_fit_wave_rows = []
@@ -309,42 +383,76 @@ if run_btn and raw_text.strip():
             if len(data_dir) < 5:
                 continue
 
+            # ✅ Sanitize data: convert to float64 and remove infinities
+            data_dir = np.array(data_dir, dtype=np.float64)
+            data_dir = data_dir[np.isfinite(data_dir)]
+            
+            if len(data_dir) < 5:
+                continue
+
             data_dir = np.sort(data_dir)
             probs = (np.arange(1,len(data_dir)+1)-0.44)/(len(data_dir)+0.12)
             fits = {}
 
-            mu, sd = stats.norm.fit(data_dir)
-            fits["Normal"] = (rmse(data_dir, stats.norm.ppf(probs, mu, sd)), stats.norm(mu, sd))
+            # Try Normal distribution
+            try:
+                mu, sd = stats.norm.fit(data_dir)
+                fits["Normal"] = (rmse(data_dir, stats.norm.ppf(probs, mu, sd)), stats.norm(mu, sd))
+            except Exception:
+                pass
 
-            s, loc, sc = stats.lognorm.fit(data_dir, floc=0)
-            fits["Lognormal"] = (rmse(data_dir, stats.lognorm.ppf(probs, s, loc, sc)), stats.lognorm(s, loc, sc))
+            # Try Lognormal distribution
+            try:
+                s, loc, sc = stats.lognorm.fit(data_dir, floc=0)
+                fits["Lognormal"] = (rmse(data_dir, stats.lognorm.ppf(probs, s, loc, sc)), stats.lognorm(s, loc, sc))
+            except Exception:
+                pass
 
-            loc, sc = stats.gumbel_r.fit(data_dir)
-            fits["Gumbel"] = (rmse(data_dir, stats.gumbel_r.ppf(probs, loc, sc)), stats.gumbel_r(loc, sc))
+            # Try Gumbel distribution with error handling
+            try:
+                loc, sc = stats.gumbel_r.fit(data_dir)
+                fits["Gumbel"] = (rmse(data_dir, stats.gumbel_r.ppf(probs, loc, sc)), stats.gumbel_r(loc, sc))
+            except (OverflowError, ValueError, RuntimeError):
+                pass
 
-            c, loc, sc = stats.weibull_min.fit(data_dir, floc=0)
-            fits["Weibull"] = (rmse(data_dir, stats.weibull_min.ppf(probs, c, loc, sc)), stats.weibull_min(c, loc, sc))
+            # Try Weibull distribution
+            try:
+                c, loc, sc = stats.weibull_min.fit(data_dir, floc=0)
+                fits["Weibull"] = (rmse(data_dir, stats.weibull_min.ppf(probs, c, loc, sc)), stats.weibull_min(c, loc, sc))
+            except Exception:
+                pass
 
-            logx = np.log10(data_dir)
-            sk, loc, sc = stats.pearson3.fit(logx)
-            fits["Log-Pearson III"] = (
-                rmse(data_dir, 10**stats.pearson3.ppf(probs, sk, loc, sc)),
-                (sk, loc, sc)
-            )
+            # Try Log-Pearson III distribution
+            try:
+                logx = np.log10(data_dir)
+                sk, loc, sc = stats.pearson3.fit(logx)
+                fits["Log-Pearson III"] = (
+                    rmse(data_dir, 10**stats.pearson3.ppf(probs, sk, loc, sc)),
+                    (sk, loc, sc)
+                )
+            except Exception:
+                pass
+
+            # Only proceed if at least one distribution fit succeeded
+            if not fits:
+                continue
 
             best = min(fits, key=lambda k: fits[k][0])
             best_fit_wave_rows.append([d, best, round(fits[best][0], 4)])
 
             for rp in RETURN_PERIODS:
                 p = 1 - 1/rp
-                eva_table_wave.loc[rp, d] = round(
-                    10**stats.pearson3.ppf(p, *fits[best][1]) if best=="Log-Pearson III"
-                    else fits[best][1].ppf(p), 2
-                )
+                try:
+                    eva_table_wave.loc[rp, d] = round(
+                        10**stats.pearson3.ppf(p, *fits[best][1]) if best=="Log-Pearson III"
+                        else fits[best][1].ppf(p), 2
+                    )
+                except Exception:
+                    eva_table_wave.loc[rp, d] = np.nan
 
         best_fit_wave_df = pd.DataFrame(
             best_fit_wave_rows, columns=["Direction","Best Fit","RMSE"]
-        ).set_index("Direction")
+        ).set_index("Direction") if best_fit_wave_rows else pd.DataFrame()
 
         # -------------------------
         # Store
@@ -365,45 +473,53 @@ if run_btn and raw_text.strip():
 
     except Exception as e:
         st.error(f"Error: {e}")
+        import traceback
+        st.error(traceback.format_exc())
 
-    # =====================================================
-    # Display results if processed
-    # =====================================================
-    if st.session_state.processed:
+# =====================================================
+# Display results if processed
+# =====================================================
+if st.session_state.processed:
 
-        tab1, tab2, tab3 = st.tabs([
-            "📊 Hindcast Results",
-            "🌬️ Wind EVA",
-            "🌊 Wave EVA"
-        ])
+    tab1, tab2, tab3 = st.tabs([
+        "📊 Hindcast Results",
+        "🌬️ Wind EVA",
+        "🌊 Wave EVA"
+    ])
 
-        with tab1:
-            st.subheader("📋 Hindcast Data Preview")
-            st.dataframe(st.session_state.df_hindcast.head(20))
+    with tab1:
+        st.subheader("📋 Hindcast Data Preview")
+        st.dataframe(st.session_state.df_hindcast.head(50))
 
-            st.download_button(
-                "⬇️ Download Hindcast Results (CSV)",
-                st.session_state.df_hindcast.to_csv(index=False),
-                file_name="hindcast_results.csv",
-                mime="text/csv"
-            )
+        st.download_button(
+            "⬇️ Download Hindcast Results (CSV)",
+            st.session_state.df_hindcast.to_csv(index=False),
+            file_name="hindcast_results.csv",
+            mime="text/csv"
+        )
 
-        with tab2:
-            st.subheader("📈 Annual Maximum Wind Speed by Direction")
-            st.dataframe(st.session_state.annual_max)
+    with tab2:
+        st.subheader("📈 Annual Maximum Wind Speed by Direction")
+        st.dataframe(st.session_state.annual_max)
 
+        if st.session_state.best_fit_df is not None and not st.session_state.best_fit_df.empty:
             st.subheader("🏆 Best Distribution per Direction (Wind)")
             st.dataframe(st.session_state.best_fit_df)
 
             st.subheader("📘 Wind EVA Return Levels")
             st.dataframe(st.session_state.eva_table)
+        else:
+            st.warning("⚠️ Insufficient data for Wind EVA analysis")
 
-        with tab3:
-            st.subheader("📈 Annual Maximum Wave Height by Direction")
-            st.dataframe(st.session_state.annual_max_wave)
+    with tab3:
+        st.subheader("📈 Annual Maximum Wave Height by Direction")
+        st.dataframe(st.session_state.annual_max_wave)
 
+        if st.session_state.best_fit_wave_df is not None and not st.session_state.best_fit_wave_df.empty:
             st.subheader("🏆 Best Distribution per Direction (Wave)")
             st.dataframe(st.session_state.best_fit_wave_df)
 
             st.subheader("📘 Wave EVA Return Levels")
             st.dataframe(st.session_state.eva_table_wave)
+        else:
+            st.warning("⚠️ Insufficient data for Wave EVA analysis")
