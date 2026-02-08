@@ -72,7 +72,7 @@ def roundup_excel(x, ndigits=1):
     factor = 10**ndigits
     return math.ceil(x * factor) / factor
 
-def create_windrose(df, use_beaufort=False, bin_interval=1.0, max_range=None):
+def create_windrose(df, use_beaufort=False, bin_interval=1.0, max_range=None, force_bins=None):
     """
     Create a windrose plot using Plotly
     
@@ -81,10 +81,13 @@ def create_windrose(df, use_beaufort=False, bin_interval=1.0, max_range=None):
     - use_beaufort: If True, use Beaufort scale bins; if False, use custom bins
     - bin_interval: Interval for custom bins (m/s)
     - max_range: Maximum radial axis range for consistency across plots (%)
+    - force_bins: Tuple of (bins, labels) to force consistent binning across plots
     """
     
     # Prepare bins
-    if use_beaufort:
+    if force_bins is not None:
+        bins, labels = force_bins
+    elif use_beaufort:
         bins = BEAUFORT_BINS
         labels = BEAUFORT_LABELS
     else:
@@ -101,6 +104,9 @@ def create_windrose(df, use_beaufort=False, bin_interval=1.0, max_range=None):
     
     # Reindex to ensure all directions are present
     rose_data = rose_data.reindex(DIRECTION_ORDER, fill_value=0)
+    
+    # Reindex columns to include all possible bins (for consistent legend)
+    rose_data = rose_data.reindex(columns=labels, fill_value=0)
     
     # Calculate percentages
     total_count = len(df_rose)
@@ -175,22 +181,23 @@ def create_windrose(df, use_beaufort=False, bin_interval=1.0, max_range=None):
             yanchor="middle",
             y=0.5,
             xanchor="left",
-            x=1.02,  # Back to original position for consistent export
+            x=0.90,  # Adjusted for 1:1.2 ratio
             font=dict(color='black', size=10),
             bgcolor='white',
             bordercolor='black',
             borderwidth=1
         ),
-        height=600,
-        width=1000,  # Fixed width for consistent export
+        height=800,  # 1:1.2 ratio (H:W)
+        width=960,   # 1:1.2 ratio (H:W)
         paper_bgcolor='white',
         plot_bgcolor='white',
-        font=dict(color='black')
+        font=dict(color='black'),
+        autosize=False  # Disable dynamic resizing
     )
     
-    return fig, rose_pct
+    return fig, rose_pct, (bins, labels)
 
-def create_waverose(df, bin_interval=0.5, fetch_dict=None, max_range=None):
+def create_waverose(df, bin_interval=0.5, fetch_dict=None, max_range=None, force_bins=None):
     """
     Create a waverose plot using Plotly
     
@@ -199,6 +206,7 @@ def create_waverose(df, bin_interval=0.5, fetch_dict=None, max_range=None):
     - bin_interval: Interval for wave height bins (m)
     - fetch_dict: Dictionary of fetch values by direction (to exclude zero-fetch directions from data)
     - max_range: Maximum radial axis range for consistency across plots (%)
+    - force_bins: Tuple of (bins, labels) to force consistent binning across plots
     """
     
     # Filter out directions with zero fetch if fetch_dict is provided
@@ -208,13 +216,16 @@ def create_waverose(df, bin_interval=0.5, fetch_dict=None, max_range=None):
         df_filtered = df_filtered[df_filtered['direction'].isin(valid_directions)]
     
     # Prepare bins
-    if len(df_filtered) > 0:
-        max_wave = df_filtered['wave_height'].max()
+    if force_bins is not None:
+        bins, labels = force_bins
     else:
-        max_wave = 1.0  # Default if no data
-    
-    bins = list(np.arange(0, max_wave + bin_interval, bin_interval))
-    labels = [f"{bins[i]:.1f}-{bins[i+1]:.1f} m" for i in range(len(bins)-1)]
+        if len(df_filtered) > 0:
+            max_wave = df_filtered['wave_height'].max()
+        else:
+            max_wave = 1.0  # Default if no data
+        
+        bins = list(np.arange(0, max_wave + bin_interval, bin_interval))
+        labels = [f"{bins[i]:.1f}-{bins[i+1]:.1f} m" for i in range(len(bins)-1)]
     
     # Bin the wave heights
     if len(df_filtered) > 0:
@@ -229,6 +240,9 @@ def create_waverose(df, bin_interval=0.5, fetch_dict=None, max_range=None):
     
     # Reindex to ALL 8 directions (this ensures all directions show on plot)
     rose_data = rose_data.reindex(DIRECTION_ORDER, fill_value=0)
+    
+    # Reindex columns to include all possible bins (for consistent legend)
+    rose_data = rose_data.reindex(columns=labels, fill_value=0)
     
     # Calculate percentages
     total_count = len(df_filtered) if len(df_filtered) > 0 else 1
@@ -300,22 +314,23 @@ def create_waverose(df, bin_interval=0.5, fetch_dict=None, max_range=None):
             yanchor="middle",
             y=0.5,
             xanchor="left",
-            x=1.02,  # Back to original position for consistent export
+            x=0.90,  # Adjusted for 1:1.2 ratio
             font=dict(color='black', size=10),
             bgcolor='white',
             bordercolor='black',
             borderwidth=1
         ),
-        height=600,
-        width=1000,  # Fixed width for consistent export
+        height=800,  # 1:1.2 ratio (H:W)
+        width=960,   # 1:1.2 ratio (H:W)
         paper_bgcolor='white',
         plot_bgcolor='white',
-        font=dict(color='black')
+        font=dict(color='black'),
+        autosize=False  # Disable dynamic resizing
     )
     
-    return fig, rose_pct
+    return fig, rose_pct, (bins, labels)
 
-def create_monthly_windroses(df, use_beaufort=False, bin_interval=1.0, max_range=None):
+def create_monthly_windroses(df, use_beaufort=False, bin_interval=1.0, max_range=None, force_bins=None):
     """
     Create wind rose plots for each month
     
@@ -333,8 +348,8 @@ def create_monthly_windroses(df, use_beaufort=False, bin_interval=1.0, max_range
         if len(df_month) == 0:
             continue
         
-        # Create rose for this month with consistent max_range
-        fig, data = create_windrose(df_month, use_beaufort, bin_interval, max_range)
+        # Create rose for this month with consistent bins from full dataset
+        fig, data, _ = create_windrose(df_month, use_beaufort, bin_interval, max_range, force_bins)
         
         # Update title to include month
         fig.update_layout(
@@ -349,7 +364,7 @@ def create_monthly_windroses(df, use_beaufort=False, bin_interval=1.0, max_range
     
     return monthly_roses
 
-def create_monthly_waveroses(df, bin_interval=0.5, fetch_dict=None, max_range=None):
+def create_monthly_waveroses(df, bin_interval=0.5, fetch_dict=None, max_range=None, force_bins=None):
     """
     Create wave rose plots for each month
     
@@ -367,8 +382,8 @@ def create_monthly_waveroses(df, bin_interval=0.5, fetch_dict=None, max_range=No
         if len(df_month) == 0:
             continue
         
-        # Create rose for this month with consistent max_range
-        fig, data = create_waverose(df_month, bin_interval, fetch_dict, max_range)
+        # Create rose for this month with consistent bins from full dataset
+        fig, data, _ = create_waverose(df_month, bin_interval, fetch_dict, max_range, force_bins)
         
         # Update title to include month
         fig.update_layout(
@@ -822,19 +837,19 @@ if run_btn and raw_text.strip():
         monthly_waveroses = None
         
         if enable_rose:
-            # Wind Rose (full dataset) - no max_range constraint for full dataset
+            # Wind Rose (full dataset) - capture bins for consistency
             use_beaufort = (wind_bin_type == "Beaufort Scale")
             interval = None if use_beaufort else wind_bin_interval
-            windrose_fig, windrose_data = create_windrose(df, use_beaufort=use_beaufort, bin_interval=interval, max_range=None)
+            windrose_fig, windrose_data, wind_bins = create_windrose(df, use_beaufort=use_beaufort, bin_interval=interval, max_range=None)
             
-            # Wave Rose (full dataset) - no max_range constraint for full dataset
-            waverose_fig, waverose_data = create_waverose(df, bin_interval=wave_bin_interval, fetch_dict=fetch_dict, max_range=None)
+            # Wave Rose (full dataset) - capture bins for consistency
+            waverose_fig, waverose_data, wave_bins = create_waverose(df, bin_interval=wave_bin_interval, fetch_dict=fetch_dict, max_range=None)
             
-            # Monthly Wind Roses - use auto-scaling (max_range=None) for optimal display
-            monthly_windroses = create_monthly_windroses(df, use_beaufort=use_beaufort, bin_interval=interval, max_range=None)
+            # Monthly Wind Roses - use bins from full dataset for consistent legend
+            monthly_windroses = create_monthly_windroses(df, use_beaufort=use_beaufort, bin_interval=interval, max_range=None, force_bins=wind_bins)
             
-            # Monthly Wave Roses - use auto-scaling (max_range=None) for optimal display
-            monthly_waveroses = create_monthly_waveroses(df, bin_interval=wave_bin_interval, fetch_dict=fetch_dict, max_range=None)
+            # Monthly Wave Roses - use bins from full dataset for consistent legend
+            monthly_waveroses = create_monthly_waveroses(df, bin_interval=wave_bin_interval, fetch_dict=fetch_dict, max_range=None, force_bins=wave_bins)
 
         # -------------------------
         # Store
@@ -928,7 +943,7 @@ if st.session_state.processed:
     if enable_rose and st.session_state.windrose_fig is not None:
         with tab4:
             st.subheader("🎯 Wind Rose Plot - Full Dataset")
-            st.plotly_chart(st.session_state.windrose_fig, use_container_width=True)
+            st.plotly_chart(st.session_state.windrose_fig, use_container_width=False)
             
             st.subheader("📊 Wind Rose Data (% Frequency)")
             st.dataframe(st.session_state.windrose_data.round(2))
@@ -946,11 +961,11 @@ if st.session_state.processed:
                 st.subheader("📅 Monthly Wind Roses")
                 
                 for month_name, (fig, data) in st.session_state.monthly_windroses.items():
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(fig, use_container_width=False)
 
         with tab5:
             st.subheader("🌊 Wave Rose Plot - Full Dataset")
-            st.plotly_chart(st.session_state.waverose_fig, use_container_width=True)
+            st.plotly_chart(st.session_state.waverose_fig, use_container_width=False)
             
             st.subheader("📊 Wave Rose Data (% Frequency)")
             st.dataframe(st.session_state.waverose_data.round(2))
@@ -968,11 +983,19 @@ if st.session_state.processed:
                 st.subheader("📅 Monthly Wave Roses")
                 
                 for month_name, (fig, data) in st.session_state.monthly_waveroses.items():
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(fig, use_container_width=False)
             
             # Download all roses button
             st.markdown("---")
+            
+            # Use session state to track if package should be generated
+            if "generate_package" not in st.session_state:
+                st.session_state.generate_package = False
+            
             if st.button("📦 Generate Download Package for All Rose Plots"):
+                st.session_state.generate_package = True
+            
+            if st.session_state.generate_package:
                 try:
                     import io
                     import zipfile
@@ -996,24 +1019,24 @@ if st.session_state.processed:
                                 # Export as PNG using kaleido
                                 # Full wind rose image
                                 if st.session_state.windrose_fig is not None:
-                                    img_bytes = pio.to_image(st.session_state.windrose_fig, format="png", width=1000, height=800)
+                                    img_bytes = pio.to_image(st.session_state.windrose_fig, format="png", width=960, height=800)
                                     zip_file.writestr("wind_rose_full.png", img_bytes)
                                 
                                 # Full wave rose image
                                 if st.session_state.waverose_fig is not None:
-                                    img_bytes = pio.to_image(st.session_state.waverose_fig, format="png", width=1000, height=800)
+                                    img_bytes = pio.to_image(st.session_state.waverose_fig, format="png", width=960, height=800)
                                     zip_file.writestr("wave_rose_full.png", img_bytes)
                                 
                                 # Monthly wind roses
                                 if st.session_state.monthly_windroses:
                                     for month_name, (fig, data) in st.session_state.monthly_windroses.items():
-                                        img_bytes = pio.to_image(fig, format="png", width=1000, height=800)
+                                        img_bytes = pio.to_image(fig, format="png", width=960, height=800)
                                         zip_file.writestr(f"wind_rose_{month_name}.png", img_bytes)
                                 
                                 # Monthly wave roses
                                 if st.session_state.monthly_waveroses:
                                     for month_name, (fig, data) in st.session_state.monthly_waveroses.items():
-                                        img_bytes = pio.to_image(fig, format="png", width=1000, height=800)
+                                        img_bytes = pio.to_image(fig, format="png", width=960, height=800)
                                         zip_file.writestr(f"wave_rose_{month_name}.png", img_bytes)
                             
                             else:
@@ -1048,7 +1071,8 @@ if st.session_state.processed:
                             label=f"⬇️ Download All Rose Plots (ZIP - {file_ext.upper()})",
                             data=zip_buffer.getvalue(),
                             file_name=f"all_rose_plots_{dt.now().strftime('%Y%m%d_%H%M%S')}.zip",
-                            mime="application/zip"
+                            mime="application/zip",
+                            on_click=lambda: setattr(st.session_state, 'generate_package', False)
                         )
                         
                         st.success(f"✅ ZIP package ready for download! ({file_ext.upper()} format)")
@@ -1057,3 +1081,4 @@ if st.session_state.processed:
                     st.error(f"Error generating download package: {str(e)}")
                     import traceback
                     st.error(traceback.format_exc())
+                    st.session_state.generate_package = False
