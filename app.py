@@ -891,27 +891,22 @@ if st.session_state.processed:
             "🌬️ Wind EVA",
             "🌊 Wave EVA",
             "🎯 Wind Rose",
-            "🌊 Wave Rose"
+            "🌊 Wave Rose",
+            "📥 Download Result"
         ])
-        tab1, tab2, tab3, tab4, tab5 = tabs
+        tab1, tab2, tab3, tab4, tab5, tab6 = tabs
     else:
         tabs = st.tabs([
             "📊 Hindcast Results",
             "🌬️ Wind EVA",
-            "🌊 Wave EVA"
+            "🌊 Wave EVA",
+            "📥 Download Result"
         ])
-        tab1, tab2, tab3 = tabs
+        tab1, tab2, tab3, tab6 = tabs
 
     with tab1:
         st.subheader("📋 Hindcast Data Preview")
         st.dataframe(st.session_state.df_hindcast.head(50))
-
-        st.download_button(
-            "⬇️ Download Hindcast Results (CSV)",
-            st.session_state.df_hindcast.to_csv(index=False),
-            file_name="hindcast_results.csv",
-            mime="text/csv"
-        )
 
     with tab2:
         st.subheader("📈 Annual Maximum Wind Speed by Direction")
@@ -923,6 +918,22 @@ if st.session_state.processed:
 
             st.subheader("📘 Wind EVA Return Levels")
             st.dataframe(st.session_state.eva_table)
+            
+            try:
+                _df = st.session_state.eva_table.copy()
+                _s = _df.stack().dropna()
+                if len(_s) > 0:
+                    _max_idx = _s.idxmax()
+                    _min_idx = _s.idxmin()
+                    _stats_df = pd.DataFrame([
+                        {"statistics": "max", "windspeed": float(_s.loc[_max_idx]), "dir": _max_idx[1], "returnperiod": int(_max_idx[0])},
+                        {"statistics": "min", "windspeed": float(_s.loc[_min_idx]), "dir": _min_idx[1], "returnperiod": int(_min_idx[0])},
+                        {"statistics": "average", "windspeed": float(_s.mean()), "dir": "-", "returnperiod": "-"},
+                    ])
+                    st.subheader("🧮 Wind EVA Statistics")
+                    st.dataframe(_stats_df)
+            except Exception:
+                pass
         else:
             st.warning("⚠️ Insufficient data for Wind EVA analysis")
 
@@ -936,6 +947,22 @@ if st.session_state.processed:
 
             st.subheader("📘 Wave EVA Return Levels")
             st.dataframe(st.session_state.eva_table_wave)
+            
+            try:
+                _dfw = st.session_state.eva_table_wave.copy()
+                _sw = _dfw.stack().dropna()
+                if len(_sw) > 0:
+                    _max_idx = _sw.idxmax()
+                    _min_idx = _sw.idxmin()
+                    _stats_w = pd.DataFrame([
+                        {"statistics": "max", "waveheight": float(_sw.loc[_max_idx]), "dir": _max_idx[1], "returnperiod": int(_max_idx[0])},
+                        {"statistics": "min", "waveheight": float(_sw.loc[_min_idx]), "dir": _min_idx[1], "returnperiod": int(_min_idx[0])},
+                        {"statistics": "average", "waveheight": float(_sw.mean()), "dir": "-", "returnperiod": "-"},
+                    ])
+                    st.subheader("🧮 Wave EVA Statistics")
+                    st.dataframe(_stats_w)
+            except Exception:
+                pass
         else:
             st.warning("⚠️ Insufficient data for Wave EVA analysis")
 
@@ -984,99 +1011,117 @@ if st.session_state.processed:
                 
                 for month_name, (fig, data) in st.session_state.monthly_waveroses.items():
                     st.plotly_chart(fig, use_container_width=False)
-            
-            # Download all roses button
+
+    with tab6:
+        if st.session_state.df_hindcast is not None:
+            st.download_button(
+                "⬇️ Download Hindcasting Result (CSV)",
+                st.session_state.df_hindcast.to_csv(index=False),
+                file_name="Hindcasting Result.csv",
+                mime="text/csv"
+            )
+        if st.session_state.annual_max is not None and st.session_state.annual_max_wave is not None:
+            import io as _io1
+            buf = _io1.StringIO()
+            buf.write("Wind\n")
+            st.session_state.annual_max.to_csv(buf)
+            buf.write("\nWave\n")
+            st.session_state.annual_max_wave.to_csv(buf)
+            st.download_button(
+                "⬇️ Annual Maximum Wind and Wave by Direction (CSV)",
+                buf.getvalue(),
+                file_name="Annual Maximum.csv",
+                mime="text/csv"
+            )
+        if st.session_state.eva_table is not None and st.session_state.eva_table_wave is not None:
+            import io as _io2
+            buf2 = _io2.StringIO()
+            buf2.write("Wind\n")
+            st.session_state.eva_table.to_csv(buf2)
+            buf2.write("\nWave\n")
+            st.session_state.eva_table_wave.to_csv(buf2)
+            st.download_button(
+                "⬇️ Wind and Wave EVA Return Levels (CSV)",
+                buf2.getvalue(),
+                file_name="EVA Result.csv",
+                mime="text/csv"
+            )
+        if enable_rose and (st.session_state.windrose_fig is not None or st.session_state.waverose_fig is not None):
             st.markdown("---")
-            
-            # Use session state to track if package should be generated
             if "generate_package" not in st.session_state:
                 st.session_state.generate_package = False
-            
             if st.button("📦 Generate Download Package for All Rose Plots"):
                 st.session_state.generate_package = True
-            
             if st.session_state.generate_package:
                 try:
                     import io
                     import zipfile
                     from datetime import datetime as dt
-                    
-                    # Try to use kaleido, fall back to HTML if not available
                     try:
                         import kaleido
                         use_kaleido = True
                     except ImportError:
                         use_kaleido = False
                         st.warning("⚠️ Kaleido not available. Exporting as HTML files instead of PNG.")
-                    
                     with st.spinner("Generating files... This may take a moment."):
-                        # Create a BytesIO buffer for the zip file
                         zip_buffer = io.BytesIO()
-                        
                         with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-                            
                             if use_kaleido:
-                                # Export as PNG using kaleido
-                                # Full wind rose image
                                 if st.session_state.windrose_fig is not None:
                                     img_bytes = pio.to_image(st.session_state.windrose_fig, format="png", width=960, height=800)
-                                    zip_file.writestr("wind_rose_full.png", img_bytes)
-                                
-                                # Full wave rose image
+                                    zip_file.writestr("wind_rose_00_full.png", img_bytes)
                                 if st.session_state.waverose_fig is not None:
                                     img_bytes = pio.to_image(st.session_state.waverose_fig, format="png", width=960, height=800)
-                                    zip_file.writestr("wave_rose_full.png", img_bytes)
-                                
-                                # Monthly wind roses
+                                    zip_file.writestr("wave_rose_00_full.png", img_bytes)
                                 if st.session_state.monthly_windroses:
                                     for month_name, (fig, data) in st.session_state.monthly_windroses.items():
                                         img_bytes = pio.to_image(fig, format="png", width=960, height=800)
-                                        zip_file.writestr(f"wind_rose_{month_name}.png", img_bytes)
-                                
-                                # Monthly wave roses
+                                        try:
+                                            mnum = datetime.strptime(month_name.strip().title(), "%B").month
+                                        except Exception:
+                                            mnum = 0
+                                        zip_file.writestr(f"wind_rose_{mnum:02d}_{month_name}.png", img_bytes)
                                 if st.session_state.monthly_waveroses:
                                     for month_name, (fig, data) in st.session_state.monthly_waveroses.items():
                                         img_bytes = pio.to_image(fig, format="png", width=960, height=800)
-                                        zip_file.writestr(f"wave_rose_{month_name}.png", img_bytes)
-                            
+                                        try:
+                                            mnum = datetime.strptime(month_name.strip().title(), "%B").month
+                                        except Exception:
+                                            mnum = 0
+                                        zip_file.writestr(f"wave_rose_{mnum:02d}_{month_name}.png", img_bytes)
                             else:
-                                # Export as interactive HTML
-                                # Full wind rose
                                 if st.session_state.windrose_fig is not None:
                                     html_str = pio.to_html(st.session_state.windrose_fig, include_plotlyjs='cdn')
-                                    zip_file.writestr("wind_rose_full.html", html_str)
-                                
-                                # Full wave rose
+                                    zip_file.writestr("wind_rose_00_full.html", html_str)
                                 if st.session_state.waverose_fig is not None:
                                     html_str = pio.to_html(st.session_state.waverose_fig, include_plotlyjs='cdn')
-                                    zip_file.writestr("wave_rose_full.html", html_str)
-                                
-                                # Monthly wind roses
+                                    zip_file.writestr("wave_rose_00_full.html", html_str)
                                 if st.session_state.monthly_windroses:
                                     for month_name, (fig, data) in st.session_state.monthly_windroses.items():
                                         html_str = pio.to_html(fig, include_plotlyjs='cdn')
-                                        zip_file.writestr(f"wind_rose_{month_name}.html", html_str)
-                                
-                                # Monthly wave roses
+                                        try:
+                                            mnum = datetime.strptime(month_name.strip().title(), "%B").month
+                                        except Exception:
+                                            mnum = 0
+                                        zip_file.writestr(f"wind_rose_{mnum:02d}_{month_name}.html", html_str)
                                 if st.session_state.monthly_waveroses:
                                     for month_name, (fig, data) in st.session_state.monthly_waveroses.items():
                                         html_str = pio.to_html(fig, include_plotlyjs='cdn')
-                                        zip_file.writestr(f"wave_rose_{month_name}.html", html_str)
-                        
-                        # Get the zip file contents
+                                        try:
+                                            mnum = datetime.strptime(month_name.strip().title(), "%B").month
+                                        except Exception:
+                                            mnum = 0
+                                        zip_file.writestr(f"wave_rose_{mnum:02d}_{month_name}.html", html_str)
                         zip_buffer.seek(0)
-                        
                         file_ext = "png" if use_kaleido else "html"
                         st.download_button(
                             label=f"⬇️ Download All Rose Plots (ZIP - {file_ext.upper()})",
                             data=zip_buffer.getvalue(),
-                            file_name=f"all_rose_plots_{dt.now().strftime('%Y%m%d_%H%M%S')}.zip",
+                            file_name="Rose Plots.zip",
                             mime="application/zip",
                             on_click=lambda: setattr(st.session_state, 'generate_package', False)
                         )
-                        
                         st.success(f"✅ ZIP package ready for download! ({file_ext.upper()} format)")
-                
                 except Exception as e:
                     st.error(f"Error generating download package: {str(e)}")
                     import traceback
