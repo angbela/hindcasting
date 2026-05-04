@@ -415,7 +415,12 @@ for k in [
 # Sidebar input
 # =====================================================
 st.sidebar.header("⏱ Time Settings")
-start_date = st.sidebar.date_input("Start date", value=datetime(2005, 1, 1))
+start_date = st.sidebar.date_input(
+    "Start date",
+    value=datetime(2005, 1, 1),
+    min_value=datetime(1900, 1, 1),
+    max_value=datetime(2100, 12, 31)
+)
 start_hour = st.sidebar.selectbox("Start hour", [f"{h:02d}:00" for h in range(24)])
 interval_hours = st.sidebar.number_input("Time interval (hours)", 1, step=1)
 
